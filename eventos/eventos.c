@@ -3,28 +3,28 @@
  * Copyright (c) 2021, EventOS Team, <event-os@outlook.com>
  *
  * SPDX-License-Identifier: MIT
- * 
+ *
  * Permission is hereby granted, free of charge, to any person obtaining a copy
  * of this software and associated documentation files (the 'Software'), to deal
  * in the Software without restriction, including without limitation the rights
- * to use, copy, modify, merge, publish, distribute, sublicense, and/or sell 
+ * to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
  * copies of the Software, and to permit persons to whom the Software is furnished
  * to do so, subject to the following conditions:
  *
  * The above copyright notice and this permission notice shall be
  * included in all copies or substantial portions of the Software.
  *
- * THE SOFTWARE IS PROVIDED 'AS IS', WITHOUT WARRANTY OF ANY KIND, EXPRESS OR 
+ * THE SOFTWARE IS PROVIDED 'AS IS', WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
  * IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY, FITNESS
- * FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE AUTHORS 
- * OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY, 
+ * FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE AUTHORS
+ * OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY,
  * WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR
  * IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
  *
  * https://www.event-os.cn
  * https://github.com/event-os/eventos-nano
  * https://gitee.com/event-os/eventos-nano
- * 
+ *
  * Change Logs:
  * Date           Author        Notes
  * 2021-11-23     DogMing       V0.0.2
@@ -39,7 +39,16 @@
 extern "C" {
 #endif
 
-/* assert ------------------------------------------------------------------- */
+/* 断言实现 --------------------------------------------------------------
+ *
+ * 断言是开发阶段的重要调试工具，用于检测不可能发生的条件。
+ * 当断言失败时，系统会停止并报告错误位置。
+ *
+ * 设计考虑：
+ * - 即使关闭断言，宏仍然存在（只是变成空操作），便于代码保留断言点
+ * - 失败时调用eos_hook_stop()停止一切中断和调度，防止错误扩大
+ * - 进入临界区确保错误报告的原子性，不被其他事件干扰
+ */
 #if (EOS_USE_ASSERT != 0)
 #define EOS_ASSERT(test_) do { if (!(test_)) {                                 \
         eos_hook_stop();                                                       \
@@ -47,51 +56,115 @@ extern "C" {
         eos_port_assert(__LINE__);                                             \
     } } while (0)
 #else
+/** @brief 断言关闭时为空操作，不产生任何代码 */
 #define EOS_ASSERT(test_)               ((void)0)
 #endif
 
-// eos define ------------------------------------------------------------------
+// 框架内部定义 ------------------------------------------------------------------
+
+/**
+ * @brief Actor运行模式枚举
+ *
+ * 区分Reactor模式和状态机模式：
+ * - Reactor: 简单的事件处理回调，没有状态概念
+ * - StateMachine: 基于状态的事件处理，支持状态转换
+ *
+ * 设计原因：同一个Actor基类可以支持两种不同的处理模式，
+ * 通过mode字段区分，框架根据mode选择不同的处理逻辑。
+ */
 enum eos_actor_mode {
-    EOS_Mode_Reactor = 0,
-    EOS_Mode_StateMachine = !EOS_Mode_Reactor
+    EOS_Mode_Reactor = 0,        /**< 反应式模式，只处理事件 */
+    EOS_Mode_StateMachine = !EOS_Mode_Reactor  /**< 状态机模式，支持状态转换 */
 };
 
-// **eos** ---------------------------------------------------------------------
+// 框架内部错误码定义 ----------------------------------------------------------
+/**
+ * @brief 框架运行返回值
+ *
+ * 这些返回值用于诊断框架运行状态。
+ * 正值表示正常流程返回，负值表示错误。
+ *
+ * 设计思路：区分不同类型的"无事件可处理"情况，
+ * 便于上层代码判断是真的没有事件，还是出了错误。
+ */
 enum {
-    EosRun_OK                               = 0,
-    EosRun_NotEnabled,
-    EosRun_NoEvent,
-    EosRun_NoActor,
-    EosRun_NoActorSub,
+    EosRun_OK                               = 0,    /**< 正常运行 */
+    EosRun_NotEnabled,                      /**< 框架未启用 */
+    EosRun_NoEvent,                         /**< 没有事件 */
+    EosRun_NoActor,                         /**< 没有注册的Actor */
+    EosRun_NoActorSub,                      /**< 没有Actor订阅当前事件 */
 
-    // Timer
-    EosTimer_Empty,
-    EosTimer_NotTimeout,
-    EosTimer_ChangeToEmpty,
+    // 定时器相关返回值
+    EosTimer_Empty,                         /**< 定时器队列为空 */
+    EosTimer_NotTimeout,                   /**< 定时器未到期 */
+    EosTimer_ChangeToEmpty,                 /**< 定时器队列变为空 */
 
-    EosRunErr_NotInitEnd                    = -1,
-    EosRunErr_ActorNotSub                   = -2,
-    EosRunErr_MallocFail                    = -3,
-    EosRunErr_SubTableNull                  = -4,
-    EosRunErr_InvalidEventData              = -5,
-    EosRunErr_HeapMemoryNotEnough           = -6,
-    EosRunErr_TimerRepeated                 = -7,
+    // 错误码（负值）
+    EosRunErr_NotInitEnd                    = -1,   /**< 初始化未完成 */
+    EosRunErr_ActorNotSub                   = -2,   /**< Actor未订阅此事件 */
+    EosRunErr_MallocFail                    = -3,   /**< 内存分配失败 */
+    EosRunErr_SubTableNull                  = -4,   /**< 订阅表未初始化 */
+    EosRunErr_InvalidEventData              = -5,   /**< 无效的事件数据 */
+    EosRunErr_HeapMemoryNotEnough           = -6,   /**< 堆内存不足 */
+    EosRunErr_TimerRepeated                 = -7,   /**< 定时器重复 */
 };
 
+/**
+ * @brief 魔术数字
+ *
+ * 用于内存覆盖检测的标记值。
+ * 当写入关键数据结构时写入此值，运行时会检查是否被破坏。
+ *
+ * 选择0xDEADBEEF的原因：
+ * - 易于识别（在十六进制 dump 中显眼）
+ * - 不太可能在正常数据中巧合出现
+ */
 #define EOS_MAGIC_NUMBER                    0xDEADBEEF
 
+/* 时间事件相关定义 ----------------------------------------------------------
+ *
+ * 时间事件（延时/周期事件）的实现使用软件定时器模拟。
+ * 系统时间由eos_tick()驱动，定时器检查是否到期。
+ *
+ * 设计考虑：
+ * - 不依赖硬件定时器中断，可在没有定时器外设的MCU上使用
+ * - 使用链表管理多个定时器，定时器数量可配置
+ * - 支持不同精度的时间单位，自动选择合适的计时粒度
+ */
+
 #if (EOS_USE_TIME_EVENT != 0)
+/** @brief 30天的毫秒数，用于时间溢出计算
+ *
+ * 系统时间使用32位无符号整数，最大值为0xFFFFFFFF。
+ * 约等于49.7天。定义30天的毫秒数用于时间溢出时的处理。
+ */
 #define EOS_MS_NUM_30DAY                    (2592000000)
 
+/**
+ * @brief 定时器精度等级
+ *
+ * 根据延时时长自动选择合适的计时精度：
+ * - EosTimerUnit_Ms: 毫秒级精度，最精细，但最大时长有限（60秒）
+ * - EosTimerUnit_100Ms: 百毫秒级，适合几分钟的延时
+ * - EosTimerUnit_Sec: 秒级，适合几十分钟的延时
+ * - EosTimerUnit_Minute: 分钟级，适合几小时甚至几天
+ *
+ * 设计原因：避免为长延时事件频繁检查计时器，提高效率。
+ */
 enum {
-    EosTimerUnit_Ms                         = 0,    // 60S, ms
-    EosTimerUnit_100Ms,                             // 100Min, 50ms
-    EosTimerUnit_Sec,                               // 16h, 500ms
-    EosTimerUnit_Minute,                            // 15day, 30S
-
+    EosTimerUnit_Ms                         = 0,    /**< 毫秒级：最大60秒 */
+    EosTimerUnit_100Ms,                             /**< 百毫秒级：最大约100分钟 */
+    EosTimerUnit_Sec,                               /**< 秒级：最大约16小时 */
+    EosTimerUnit_Minute,                            /**< 分钟级：最大约15天 */
     EosTimerUnit_Max
 };
 
+/**
+ * @brief 各精度等级的时间阈值
+ *
+ * 当延时超过阈值时，需要使用更粗的精度等级。
+ * 例如：延时70秒应使用秒级而非毫秒级。
+ */
 static const eos_u32_t timer_threshold[EosTimerUnit_Max] = {
     60000,                                          // 60 S
     6000000,                                        // 100 Minutes
@@ -99,83 +172,155 @@ static const eos_u32_t timer_threshold[EosTimerUnit_Max] = {
     1296000000,                                     // 15 days
 };
 
+/**
+ * @brief 各精度等级的最小时间单位
+ *
+ * 用于计算周期事件的实际触发间隔。
+ * 例如：周期事件period=5，unit=Sec时，实际周期为5秒。
+ */
 static const eos_u32_t timer_unit[EosTimerUnit_Max] = {
     1, 100, 1000, 60000
 };
 
+/**
+ * @brief 时间事件结构体
+ *
+ * 存储单个定时器事件的所有信息。
+ * 使用位域压缩存储，节省内存。
+ *
+ * 设计亮点：
+ * - topic: 13位，最大支持8192个不同主题
+ * - oneshoot: 1位，标记是否是一次性事件
+ * - unit: 2位，选择时间精度
+ * - period: 16位，周期值
+ */
 typedef struct eos_event_timer {
-    eos_u32_t topic                         : 13;
-    eos_u32_t oneshoot                      : 1;
-    eos_u32_t unit                          : 2;
-    eos_u32_t period                        : 16;
-    eos_u32_t timeout_ms;
+    eos_u32_t topic                         : 13;   /**< 事件主题 */
+    eos_u32_t oneshoot                      : 1;    /**< 是否一次性（True=一次性，False=周期） */
+    eos_u32_t unit                          : 2;    /**< 时间单位 */
+    eos_u32_t period                        : 16;   /**< 周期值（实际时间=period*timer_unit） */
+    eos_u32_t timeout_ms;                          /**< 到期时间点（绝对时间） */
 } eos_event_timer_t;
 #endif
 
+/**
+ * @brief 堆内存块结构体
+ *
+ * 管理堆内存分配的基本单位。
+ * 每个块包含：前向/后向链表指针、队列链表指针、大小、状态等。
+ *
+ * 设计考虑：
+ * - next/last: 用于空闲块链表管理（内存合并）
+ * - q_next/q_last: 用于已分配块队列管理（事件队列）
+ * - free: 标记块是否空闲
+ * - offset: 处理对齐问题，记录填充字节数
+ */
 typedef struct eos_block {
     // word[0]
-    eos_u32_t next                          : 15;
-    eos_u32_t q_next                        : 15;
+    eos_u32_t next                          : 15;   /**< 下一个空闲块偏移（链表） */
+    eos_u32_t q_next                        : 15;   /**< 队列中下一个块偏移 */
     // word[1]
-    eos_u32_t last                          : 15;
-    eos_u32_t q_last                        : 15;
-    eos_u32_t free                          : 1;
+    eos_u32_t last                          : 15;   /**< 上一个空闲块偏移（链表） */
+    eos_u32_t q_last                        : 15;   /**< 队列中上一个块偏移 */
+    eos_u32_t free                          : 1;    /**< 是否空闲：1=空闲，0=已分配 */
     // word[2]
-    eos_u16_t size                          : 15;
-    eos_u32_t offset                        : 8;
+    eos_u16_t size                          : 15;   /**< 数据区大小（不含块头） */
+    eos_u32_t offset                        : 8;    /**< 对齐填充字节数 */
 } eos_block_t;
 
+/**
+ * @brief 事件内部结构体
+ *
+ * 存储在堆中的事件数据结构。
+ * 包含事件订阅信息和主题，紧跟在块头之后。
+ *
+ * sub字段用于快速判断哪些Actor订阅了该事件，
+ * 无需遍历订阅表即可确定事件的目标。
+ */
 typedef struct eos_event_inner {
-    eos_sub_t sub;
-    eos_topic_t topic;
+    eos_sub_t sub;                           /**< 订阅此事件的Actor位掩码 */
+    eos_topic_t topic;                      /**< 事件主题 */
 } eos_event_inner_t;
 
+/**
+ * @brief 堆内存管理结构体
+ *
+ * 管理整个事件堆的元数据。
+ *
+ * 设计亮点：
+ * - data: 堆数据区，实际的事件存储在这里
+ * - queue: 指向事件队列头（按时间/优先级排序）
+ * - current: 当前处理的块位置
+ * - sub_general: 所有待处理事件的订阅位掩码"或"结果
+ *
+ * 使用位掩码追踪有哪些Actor有待处理事件，
+ * 事件分发时快速跳过没有事件的Actor。
+ */
 typedef struct eos_heap {
 #if (EOS_USE_MAGIC != 0)
-    eos_u32_t magic;
+    eos_u32_t magic;                         /**< 魔术数字，检测覆盖 */
 #endif
-    eos_u8_t data[EOS_SIZE_HEAP];
+    eos_u8_t data[EOS_SIZE_HEAP];           /**< 堆数据区 */
     // word[0]
-    eos_u32_t size                          : 15;       /* total size */
-    eos_u32_t queue                         : 15;
-    eos_u32_t error_id                      : 2;
+    eos_u32_t size                          : 15;       /**< 堆总大小 */
+    eos_u32_t queue                         : 15;       /**< 事件队列头索引 */
+    eos_u32_t error_id                      : 2;        /**< 错误状态 */
     // word[2]
-    eos_u32_t current                       : 15;
-    eos_u32_t empty                         : 1;
-    // word[2]
-    eos_sub_t sub_general;
-    eos_sub_t count;
+    eos_u32_t current                       : 15;       /**< 当前块位置 */
+    eos_u32_t empty                         : 1;        /**< 堆是否为空 */
+    // word[3]
+    eos_sub_t sub_general;                          /**< 全局订阅标志（所有事件订阅的或） */
+    eos_sub_t count;                                /**< 块计数器 */
 } eos_heap_t;
 
+/**
+ * @brief EventOS框架主结构体
+ *
+ * 这是框架的核心数据结构，保存所有运行时状态。
+ * 设计为单例模式，整个系统只有一个实例。
+ *
+ * 组成：
+ * - magic: 魔术数字（可选）
+ * - sub_table: 订阅表指针
+ * - actors: Actor注册表（数组）
+ * - heap: 事件堆（如果启用）
+ * - etimer: 定时器数组（如果启用）
+ * - time: 系统时间
+ * - enabled/running/init_end: 状态标志
+ */
 typedef struct eos_tag {
 #if (EOS_USE_MAGIC != 0)
-    eos_u32_t magic;
+    eos_u32_t magic;                         /**< 框架魔术数字 */
 #endif
 #if (EOS_USE_PUB_SUB != 0)
-    eos_mcu_t *sub_table;                                     // event sub table
+    eos_mcu_t *sub_table;                   /**< 事件订阅表（用户分配） */
 #endif
 
-    eos_mcu_t actor_exist;
-    eos_mcu_t actor_enabled;
-    eos_actor_t * actor[EOS_MAX_ACTORS];
+    eos_mcu_t actor_exist;                   /**< 已注册的Actor位掩码 */
+    eos_mcu_t actor_enabled;                 /**< 已启用的Actor位掩码 */
+    eos_actor_t * actor[EOS_MAX_ACTORS];    /**< Actor指针数组 */
 
 #if (EOS_USE_EVENT_DATA != 0)
-    eos_heap_t heap;
+    eos_heap_t heap;                        /**< 事件堆 */
 #endif
 
 #if (EOS_USE_TIME_EVENT != 0)
-    eos_event_timer_t etimer[EOS_MAX_TIME_EVENT];
-    eos_u32_t time;
-    eos_u32_t timeout_min;
-    eos_u8_t timer_count;
+    eos_event_timer_t etimer[EOS_MAX_TIME_EVENT];  /**< 时间事件数组 */
+    eos_u32_t time;                         /**< 系统时间（毫秒） */
+    eos_u32_t timeout_min;                  /**< 最近的定时器到期时间 */
+    eos_u8_t timer_count;                   /**< 当前定时器数量 */
 #endif
 
-    eos_u8_t enabled                        : 1;
-    eos_u8_t running                        : 1;
-    eos_u8_t init_end                       : 1;
+    eos_u8_t enabled                        : 1;   /**< 框架是否启用 */
+    eos_u8_t running                        : 1;   /**< 框架是否正在运行 */
+    eos_u8_t init_end                       : 1;   /**< 初始化是否完成 */
 } eos_t;
 
-/* eventos API for test ----------------------------- */
+/* 框架测试API --------------------------------------------------------------
+ *
+ * 这些API主要用于单元测试，不属于公共API。
+ * 允许测试代码访问框架内部状态。
+ */
 eos_s8_t eos_once(void);
 eos_s8_t eos_event_pub_ret(eos_topic_t topic, void *data, eos_u32_t size);
 void * eos_get_framework(void);
@@ -183,27 +328,39 @@ void eos_event_pub_time(eos_topic_t topic, eos_u32_t time_ms, eos_bool_t oneshoo
 void eos_set_time(eos_u32_t time_ms);
 // **eos end** -----------------------------------------------------------------
 
+/** @brief 框架全局实例（单例） */
 static eos_t eos;
 
-// data ------------------------------------------------------------------------
+/* 事件表定义 ----------------------------------------------------------
+ *
+ * 预定义框架保留事件的表。
+ * 这些事件用于状态机的状态转换触发。
+ */
 #if (EOS_USE_SM_MODE != 0)
 static const eos_event_t eos_event_table[Event_User] = {
-    {Event_Null, 0},
-    {Event_Enter, 0},
-    {Event_Exit, 0},
+    {Event_Null, 0},        /**< 空事件：查询当前状态 */
+    {Event_Enter, 0},       /**< 进入事件：状态入口 */
+    {Event_Exit, 0},       /**< 退出事件：状态出口 */
 #if (EOS_USE_HSM_MODE != 0)
-    {Event_Init, 0},
+    {Event_Init, 0},        /**< 初始化事件：HSM特有 */
 #endif
 };
 #endif
 
-// macro -----------------------------------------------------------------------
+/* 宏定义 --------------------------------------------------------------
+ *
+ * 层次状态机(HSM)的触发宏。
+ * 用于在HSM中调用状态处理函数。
+ *
+ * 设计原因：HSM的状态转换需要调用状态函数并传递特殊的事件。
+ * 这个宏简化了调用语法，使得状态转换逻辑更清晰。
+ */
 #if (EOS_USE_SM_MODE != 0)
 #define HSM_TRIG_(state_, topic_)                                              \
     ((*(state_))(me, &eos_event_table[topic_]))
 #endif
 
-// static function -------------------------------------------------------------
+// 静态函数声明 -------------------------------------------------------------
 #if (EOS_USE_SM_MODE != 0)
 static void eos_sm_dispath(eos_sm_t * const me, eos_event_t const * const e);
 #if (EOS_USE_HSM_MODE != 0)
@@ -218,7 +375,13 @@ void *eos_heap_get_block(eos_heap_t * const me, eos_u8_t priority);
 void eos_heap_gc(eos_heap_t * const me, void *data);
 #endif
 
-// eventos ---------------------------------------------------------------------
+// 框架核心实现 ==============================================================
+
+/**
+ * @brief 清除框架运行时状态
+ *
+ * 在停止或重新初始化时调用，重置动态状态。
+ */
 static void eos_clear(void)
 {
 #if (EOS_USE_TIME_EVENT != 0)
@@ -226,6 +389,21 @@ static void eos_clear(void)
 #endif
 }
 
+/**
+ * @brief 框架初始化
+ *
+ * 必须是最先调用的函数，在任何Actor初始化之前。
+ *
+ * 初始化内容：
+ * 1. 清除运行时数据
+ * 2. 设置魔术数字（如果启用）
+ * 3. 设置初始状态为启用但未运行
+ * 4. 清空Actor注册表
+ * 5. 初始化堆内存
+ * 6. 设置init_end标志
+ *
+ * 注意：初始化后框架并未运行，需要调用eos_run()才进入事件循环。
+ */
 void eos_init(void)
 {
     eos_clear();
@@ -251,6 +429,20 @@ void eos_init(void)
 #endif
 }
 
+/**
+ * @brief 订阅表初始化
+ *
+ * 初始化发布-订阅机制的订阅标志表。
+ *
+ * @param flag_sub 指向订阅表的指针（用户分配）
+ * @param topic_max 最大的主题数量
+ *
+ * 设计理由：订阅表由用户分配内存，框架只负责使用。
+ * 这样用户可以选择：
+ * - 静态分配：放在全局变量区
+ * - 栈分配：临时使用
+ * - 动态分配：按需创建和释放
+ */
 #if (EOS_USE_PUB_SUB != 0)
 void eos_sub_init(eos_mcu_t *flag_sub, eos_topic_t topic_max)
 {
@@ -261,23 +453,55 @@ void eos_sub_init(eos_mcu_t *flag_sub, eos_topic_t topic_max)
 }
 #endif
 
+/* 时间事件处理 ================================================================
+ *
+ * 时间事件的处理流程：
+ * 1. 应用程序发布延时/周期事件（eos_event_pub_delay/period）
+ * 2. 事件被加入定时器数组，等待到期
+ * 3. 每次eos_tick()更新系统时间
+ * 4. eos_once()中调用eos_evttimer()检查到期事件
+ * 5. 到期事件被发布到事件队列，转换为普通事件处理
+ *
+ * 设计亮点：
+ * - 使用绝对时间（timeout_ms）而非相对时间，便于处理溢出
+ * - 自动选择时间精度，减少不必要的检查开销
+ */
+
+/**
+ * @brief 检查并处理到期的时间事件
+ *
+ * 在eos_once()的每次调用中检查定时器队列。
+ * 将到期的定时器事件转换为普通事件发布。
+ *
+ * @return 处理结果码
+ *
+ * 处理逻辑：
+ * 1. 如果定时器队列为空，返回EosTimer_Empty
+ * 2. 如果当前时间未到最近到期时间，返回EosTimer_NotTimeout
+ * 3. 遍历所有定时器，到期的：
+ *    - 一次性事件：从队列移除
+ *    - 周期事件：更新timeout_ms继续等待
+ * 4. 重新计算timeout_min
+ */
 #if (EOS_USE_TIME_EVENT != 0)
 eos_s32_t eos_evttimer(void)
 {
     // 获取当前时间，检查延时事件队列
     eos_u32_t system_time = eos.time;
-    
+
     if (eos.etimer[0].topic == Event_Null)
         return EosTimer_Empty;
 
     // 时间未到达
     if (system_time < eos.timeout_min)
         return EosTimer_NotTimeout;
+
     // 若时间到达，将此事件推入事件队列，同时在etimer里删除。
     for (eos_u32_t i = 0; i < eos.timer_count; i ++) {
         if (eos.etimer[i].timeout_ms > system_time)
             continue;
         eos_event_pub_topic(eos.etimer[i].topic);
+
         // 清零标志位
         if (eos.etimer[i].oneshoot == EOS_True) {
             if (i == (eos.timer_count - 1)) {
@@ -311,6 +535,30 @@ eos_s32_t eos_evttimer(void)
 }
 #endif
 
+/**
+ * @brief 处理一个事件（单步执行）
+ *
+ * 框架的主处理函数，每次调用处理一个事件。
+ * 被eos_run()中的循环反复调用。
+ *
+ * @return 处理结果，>=0表示正常，<0表示错误
+ *
+ * 处理流程：
+ * 1. 检查初始化状态
+ * 2. 检查订阅表是否初始化
+ * 3. 检查框架是否启用
+ * 4. 检查是否有注册的Actor
+ * 5. 检查时间事件（如果有启用）
+ * 6. 检查是否有待处理事件
+ * 7. 找到优先级最高的待处理事件
+ * 8. 提取事件并分发到对应的Actor
+ * 9. 事件处理完毕后释放事件内存
+ *
+ * 设计要点：
+ * - 返回值区分不同情况，上层可以根据返回值决定行为
+ * - 事件按优先级处理，高优先级Actor的事件先处理
+ * - 使用临界区保护堆操作，防止数据竞争
+ */
 eos_s8_t eos_once(void)
 {
     if (eos.init_end == 0) {
@@ -381,7 +629,7 @@ eos_s8_t eos_once(void)
             eos_sm_t *sm = (eos_sm_t *)actor;
             eos_sm_dispath(sm, &event);
         }
-        else 
+        else
 #endif
         {
             eos_reactor_t *reactor = (eos_reactor_t *)actor;
@@ -403,6 +651,24 @@ eos_s8_t eos_once(void)
     return (eos_s8_t)EosRun_OK;
 }
 
+/**
+ * @brief 启动框架（进入事件循环）
+ *
+ * 框架的入口函数，调用后永远不会返回。
+ *
+ * 处理流程：
+ * 1. 调用eos_hook_start()钩子
+ * 2. 断言各种前置条件
+ * 3. 设置running标志
+ * 4. 进入主循环，调用eos_once()处理事件
+ * 5. 当enabled变为false时退出循环
+ * 6. 进入空闲循环，调用eos_hook_idle()
+ *
+ * 设计要点：
+ * - 断言检查前置条件，确保系统状态正确
+ * - 退出循环后进入空闲处理，不再返回
+ * - 使用while(1)确保不会意外退出
+ */
 void eos_run(void)
 {
     eos_hook_start();
@@ -444,18 +710,52 @@ void eos_run(void)
     }
 }
 
+/**
+ * @brief 停止框架
+ *
+ * 请求框架停止运行。
+ * 设置enabled为false，下一次eos_once()循环时会检测到并退出。
+ *
+ * 注意：这只是请求，不是立即停止。
+ * 框架会处理完当前事件后才退出循环。
+ */
 void eos_stop(void)
 {
     eos.enabled = EOS_False;
     eos_hook_stop();
 }
 
+/* 时间管理 ================================================================
+ *
+ * 系统时间由eos_tick()驱动，每次调用增加EOS_TICK_MS毫秒。
+ * 时间事件基于这个时间进行计算。
+ */
+
+/**
+ * @brief 获取系统当前时间
+ *
+ * @return 系统启动以来的毫秒数
+ */
 #if (EOS_USE_TIME_EVENT != 0)
 eos_u32_t eos_time(void)
 {
     return eos.time;
 }
 
+/**
+ * @brief 系统Tick更新
+ *
+ * 由定时器中断调用，推动系统时间前进。
+ *
+ * 处理逻辑：
+ * 1. 时间正常增加
+ * 2. 检测时间溢出回绕（接近最大值时）
+ * 3. 溢出时调整所有定时器的到期时间
+ *
+ * 设计亮点：
+ * - 使用模运算处理时间溢出
+ * - 溢出时调整定时器使用户看不到时间"回绕"
+ */
 void eos_tick(void)
 {
     eos_u32_t system_time = eos.time, system_time_bkp = eos.time;
@@ -475,7 +775,29 @@ void eos_tick(void)
 }
 #endif
 
-// 关于Reactor -----------------------------------------------------------------
+// Actor相关实现 ================================================================
+
+/**
+ * @brief Actor基类初始化
+ *
+ * 所有Actor（Reactor/StateMachine）的公共初始化逻辑。
+ *
+ * @param me       Actor指针
+ * @param priority 优先级
+ * @param parameter 初始化参数（未使用）
+ *
+ * 检查项：
+ * - 框架已启用
+ * - 框架未运行（防止运行时注册）
+ * - 订阅表已初始化
+ * - Actor指针有效
+ * - 优先级未冲突
+ *
+ * 设计要点：
+ * - 防止二次启动（re-entry guard）
+ * - 使用位掩码检测优先级冲突
+ * - 注册后actor_exist对应位被置1
+ */
 static void eos_actor_init( eos_actor_t * const me,
                             eos_u8_t priority,
                             void const * const parameter)
@@ -502,13 +824,19 @@ static void eos_actor_init( eos_actor_t * const me,
     // 注册到框架里
     eos.actor_exist |= (1 << priority);
     eos.actor[priority] = me;
-    // 状态机   
+    // 状态机
     me->priority = priority;
 #if (EOS_USE_MAGIC != 0)
     me->magic = EOS_MAGIC_NUMBER;
 #endif
 }
 
+/**
+ * @brief Reactor初始化
+ *
+ * 初始化Reactor类型的Actor。
+ * 调用基类初始化后设置运行模式为Reactor。
+ */
 void eos_reactor_init(  eos_reactor_t * const me,
                         eos_u8_t priority,
                         void const * const parameter)
@@ -517,6 +845,15 @@ void eos_reactor_init(  eos_reactor_t * const me,
     me->super.mode = EOS_Mode_Reactor;
 }
 
+/**
+ * @brief 启动Reactor
+ *
+ * 设置事件处理函数并启用Reactor。
+ * 启用后，Reactor开始接收和处理事件。
+ *
+ * @param me            Reactor指针
+ * @param event_handler 事件处理函数
+ */
 void eos_reactor_start(eos_reactor_t * const me, eos_event_handler event_handler)
 {
     me->event_handler = event_handler;
@@ -524,7 +861,24 @@ void eos_reactor_start(eos_reactor_t * const me, eos_event_handler event_handler
     eos.actor_enabled |= (1 << me->super.priority);
 }
 
-// state machine ---------------------------------------------------------------
+/* 状态机实现 ================================================================
+ *
+ * 状态机是EventOS的核心功能之一。
+ * 支持两种模式：
+ * 1. FSM（有限状态机）：简单的状态转换
+ * 2. HSM（层次状态机）：支持状态嵌套和继承
+ *
+ * 设计亮点：
+ * - 状态即函数：通过函数指针实现状态
+ * - 返回值驱动：状态转换由返回值决定，而非硬编码
+ * - 层次化设计（HSM）：事件可以向上传递给父状态处理
+ */
+
+/**
+ * @brief 状态机初始化
+ *
+ * @see eos_actor_init()
+ */
 #if (EOS_USE_SM_MODE != 0)
 void eos_sm_init(   eos_sm_t * const me,
                     eos_u8_t priority,
@@ -535,6 +889,28 @@ void eos_sm_init(   eos_sm_t * const me,
     me->state = eos_state_top;
 }
 
+/**
+ * @brief 启动状态机
+ *
+ * 状态机启动流程：
+ * 1. 设置初始状态
+ * 2. 启用Actor
+ * 3. 执行初始转换（Initial Transition）
+ *
+ * 对于FSM：
+ * - 执行一次空事件获取目标状态
+ * - 执行Exit事件（从原状态）
+ * - 执行Enter事件（到目标状态）
+ *
+ * 对于HSM：
+ * - 执行空事件获取完整状态路径
+ * - 从顶层开始逐层进入子状态
+ * - 递归执行Init事件直到没有转换
+ *
+ * 设计要点：
+ * - 初始转换是自动的，无需用户手动触发
+ * - HSM的层次初始化支持嵌套状态的自动进入
+ */
 void eos_sm_start(eos_sm_t * const me, eos_state_handler state_init)
 {
 #if (EOS_USE_HSM_MODE != 0)
@@ -587,7 +963,33 @@ void eos_sm_start(eos_sm_t * const me, eos_state_handler state_init)
 }
 #endif
 
-// event -----------------------------------------------------------------------
+// 事件发布-订阅实现 ==========================================================
+
+/**
+ * @brief 发布事件（带返回值）
+ *
+ * 事件发布的核心函数，处理事件创建、内存分配、数据复制。
+ *
+ * @param topic 事件主题
+ * @param data  数据指针
+ * @param size  数据大小
+ * @return 成功/失败状态
+ *
+ * 处理流程：
+ * 1. 检查框架状态
+ * 2. 检查是否有订阅者
+ * 3. 进入临界区
+ * 4. 分配堆内存
+ * 5. 填充事件数据
+ * 6. 更新全局订阅标志
+ * 7. 复制用户数据
+ * 8. 退出临界区
+ *
+ * 设计要点：
+ * - 事件数据被复制到堆中，发布函数返回后数据可安全复用
+ * - 使用临界区保护堆操作
+ * - 失败时返回错误码而非断言，让调用者决定如何处理
+ */
 eos_s8_t eos_event_pub_ret(eos_topic_t topic, void *data, eos_u32_t size)
 {
     if (eos.init_end == 0) {
@@ -643,6 +1045,11 @@ eos_s8_t eos_event_pub_ret(eos_topic_t topic, void *data, eos_u32_t size)
     return (eos_s8_t)EosRun_OK;
 }
 
+/**
+ * @brief 发布事件（仅主题）
+ *
+ * 发布一个不带数据的事件。
+ */
 void eos_event_pub_topic(eos_topic_t topic)
 {
     eos_s8_t ret = eos_event_pub_ret(topic, EOS_NULL, 0);
@@ -650,6 +1057,11 @@ void eos_event_pub_topic(eos_topic_t topic)
     (void)ret;
 }
 
+/**
+ * @brief 发布事件（携带数据）
+ *
+ * 发布一个带数据负载的事件。
+ */
 #if (EOS_USE_EVENT_DATA != 0)
 void eos_event_pub(eos_topic_t topic, void *data, eos_u32_t size)
 {
@@ -659,18 +1071,49 @@ void eos_event_pub(eos_topic_t topic, void *data, eos_u32_t size)
 }
 #endif
 
+/**
+ * @brief 订阅事件
+ *
+ * 设置Actor对指定主题的订阅。
+ */
 #if (EOS_USE_PUB_SUB != 0)
 void eos_event_sub(eos_actor_t * const me, eos_topic_t topic)
 {
     eos.sub_table[topic] |= (1 << me->priority);
 }
 
+/**
+ * @brief 取消订阅
+ *
+ * 清除Actor对指定主题的订阅。
+ */
 void eos_event_unsub(eos_actor_t * const me, eos_topic_t topic)
 {
     eos.sub_table[topic] &= ~(1 << me->priority);
 }
 #endif
 
+/* 时间事件实现 ================================================================
+ *
+ * 时间事件的发布接口。
+ * 时间事件不是立即投递，而是加入定时器队列，等待到期后自动投递。
+ */
+
+/**
+ * @brief 发布延时/周期事件
+ *
+ * @param topic     事件主题
+ * @param time_ms   时间（延时或周期）
+ * @param oneshoot  True=一次性，False=周期重复
+ *
+ * 实现逻辑：
+ * 1. 检查定时器数量未超限
+ * 2. 检查没有重复的定时器（同一主题不能有多个）
+ * 3. 根据时间选择精度单位
+ * 4. 计算到期时间点（绝对时间）
+ * 5. 加入定时器数组
+ * 6. 更新timeout_min（最近的到期时间）
+ */
 #if (EOS_USE_TIME_EVENT != 0)
 void eos_event_pub_time(eos_topic_t topic, eos_u32_t time_ms, eos_bool_t oneshoot)
 {
@@ -690,7 +1133,7 @@ void eos_event_pub_time(eos_topic_t topic, eos_u32_t time_ms, eos_bool_t oneshoo
         if (time_ms > timer_threshold[i])
             continue;
         unit = i;
-        
+
         if (i == EosTimerUnit_Ms) {
             period = time_ms;
             break;
@@ -702,22 +1145,33 @@ void eos_event_pub_time(eos_topic_t topic, eos_u32_t time_ms, eos_bool_t oneshoo
     eos.etimer[eos.timer_count ++] = (eos_event_timer_t) {
         topic, oneshoot, unit, period, timeout
     };
-    
+
     if (eos.timeout_min > timeout) {
         eos.timeout_min = timeout;
     }
 }
 
+/**
+ * @brief 发布延时一次性事件
+ */
 void eos_event_pub_delay(eos_topic_t topic, eos_u32_t time_ms)
 {
     eos_event_pub_time(topic, time_ms, EOS_True);
 }
 
-void eos_event_pub_period(eos_topic_t topic, eos_u32_t time_ms_period)
+/**
+ * @brief 发布周期事件
+ */
+void eos_event_pub_period(eos_topic_t topic, eos_u32_t peroid_ms)
 {
-    eos_event_pub_time(topic, time_ms_period, EOS_False);
+    eos_event_pub_time(topic, peroid_ms, EOS_False);
 }
 
+/**
+ * @brief 取消时间事件
+ *
+ * 从定时器数组中移除指定主题的事件。
+ */
 void eos_event_time_cancel(eos_topic_t topic)
 {
     eos_u32_t timeout_min = EOS_U32_MAX;
@@ -743,7 +1197,13 @@ void eos_event_time_cancel(eos_topic_t topic)
 }
 #endif
 
-// state tran ------------------------------------------------------------------
+// 状态转换API ================================================================
+
+/**
+ * @brief 执行状态转换
+ *
+ * 在状态处理函数中调用，触发状态转换。
+ */
 #if (EOS_USE_SM_MODE != 0)
 eos_ret_t eos_tran(eos_sm_t * const me, eos_state_handler state)
 {
@@ -752,6 +1212,11 @@ eos_ret_t eos_tran(eos_sm_t * const me, eos_state_handler state)
     return EOS_Ret_Tran;
 }
 
+/**
+ * @brief 转换到父状态
+ *
+ * HSM模式专用，表示事件需要在父状态处理。
+ */
 eos_ret_t eos_super(eos_sm_t * const me, eos_state_handler state)
 {
     me->state = state;
@@ -759,6 +1224,12 @@ eos_ret_t eos_super(eos_sm_t * const me, eos_state_handler state)
     return EOS_Ret_Super;
 }
 
+/**
+ * @brief 顶层状态处理函数
+ *
+ * 所有状态层次的最顶层。
+ * 接收到未处理的事件时返回EOS_Ret_Null。
+ */
 eos_ret_t eos_state_top(eos_sm_t * const me, eos_event_t const * const e)
 {
     (void)me;
@@ -768,7 +1239,30 @@ eos_ret_t eos_state_top(eos_sm_t * const me, eos_event_t const * const e)
 }
 #endif
 
-// static function -------------------------------------------------------------
+/* 状态机分发 ================================================================
+ *
+ * 状态机事件处理的核心算法。
+ * 根据模式（FSM/HSM）执行不同的事件分发策略。
+ */
+
+/**
+ * @brief 状态机事件分发
+ *
+ * 将事件分发到状态机的当前状态处理。
+ *
+ * FSM模式：
+ * 1. 调用当前状态处理函数
+ * 2. 如果返回Tran，执行状态转换
+ * 3. 先执行Exit，再执行Enter
+ *
+ * HSM模式：
+ * 1. 循环调用当前状态，直到不返回Super
+ * 2. 如果Tran，追溯状态转换路径
+ * 3. 执行LCA（最低公共祖先）检测
+ * 4. 从上到下执行Exit
+ * 5. 从上到下执行Enter
+ * 6. 处理Init事件（可能触发新的转换）
+ */
 #if (EOS_USE_SM_MODE != 0)
 static void eos_sm_dispath(eos_sm_t * const me, eos_event_t const * const e)
 {
@@ -782,7 +1276,7 @@ static void eos_sm_dispath(eos_sm_t * const me, eos_event_t const * const e)
 #if (EOS_USE_HSM_MODE == 0)
     eos_state_handler s = me->state;
     eos_state_handler t;
-    
+
     r = s(me, e);
     if (r == EOS_Ret_Tran) {
         t = me->state;
@@ -864,6 +1358,36 @@ static void eos_sm_dispath(eos_sm_t * const me, eos_event_t const * const e)
 #endif
 }
 
+/* HSM状态转换算法 ============================================================
+ *
+ * 层次状态机的转换算法是EventOS的核心。
+ * 它处理状态转换时的进入/退出路径，确保：
+ * 1. 所有必要的父状态都被进入
+ * 2. 适当的父状态不被重复进入
+ * 3. 退出路径上的状态都执行Exit
+ *
+ * 核心概念：
+ * - LCA（Lowest Common Ancestor）：源状态和目标状态的最低公共祖先
+ * - 转换路径：从目标状态到LCA的路径
+ * - 进入路径：从LCA下一级到目标状态的路径
+ *
+ * 转换规则：
+ * (a) s == t: 转换到自己，直接返回
+ * (b) source == target->super: 目标状态的父状态就是源状态
+ * (c) source->super == target->super: 源和目标有共同父状态
+ * (d) source->super == target: 源状态是目标状态的父状态
+ * (e) 其他情况：需要计算完整的LCA
+ */
+
+/**
+ * @brief HSM状态转换算法
+ *
+ * 计算层次状态机转换时的进入路径索引。
+ *
+ * @param me   状态机指针
+ * @param path 转换路径数组 [目标, 源->super的super, 源]
+ * @return 进入路径索引
+ */
 #if (EOS_USE_HSM_MODE != 0)
 static eos_s32_t eos_sm_tran(eos_sm_t * const me, eos_state_handler path[EOS_MAX_HSM_NEST_DEPTH])
 {
@@ -988,15 +1512,52 @@ static eos_s32_t eos_sm_tran(eos_sm_t * const me, eos_state_handler path[EOS_MAX
 #endif
 #endif
 
-/* heap library ------------------------------------------------------------- */
+/* 堆内存管理 ================================================================
+ *
+ * EventOS使用动态内存管理来存储事件数据负载。
+ * 堆内存分配算法：First-Fit（首次适配）
+ *
+ * 设计特点：
+ * - 固定大小堆：编译时确定大小，无外部依赖
+ * - 块式管理：每个分配块包含元头和数据区
+ * - 双向链表：空闲块和已分配块都用链表管理
+ * - 连续合并：释放时合并相邻的空闲块
+ *
+ * 内存布局：
+ * +--------+--------+------------------+
+ * | block  | block  |      block       |
+ * | header | header |     header        |
+ * +--------+--------+------------------+
+ * |  data  |  data  |      data        |
+ * +--------+--------+------------------+
+ *  ^        ^
+ *  |        |
+ *  空闲块    已分配块（队列管理）
+ */
+
+/**
+ * @brief 初始化堆
+ *
+ * 设置堆的初始状态，创建第一个空闲块。
+ *
+ * 初始状态：
+ * - 整个堆是一个大的空闲块
+ * - queue指向空（无已分配块）
+ * - empty标志设为true
+ *
+ * 设计要点：
+ * - 使用memset清零数据区
+ * - 第一个空闲块的last设为EOS_HEAP_MAX（无前一块）
+ * - 空闲块大小 = 堆大小 - 块头大小
+ */
 void eos_heap_init(eos_heap_t * const me)
 {
     eos_block_t * block_1st;
-    
+
 #if (EOS_USE_MAGIC != 0)
     me->magic = EOS_MAGIC_NUMBER;
 #endif
-    
+
     // block start
     me->queue = EOS_HEAP_MAX;
     me->error_id = 0;
@@ -1009,13 +1570,31 @@ void eos_heap_init(eos_heap_t * const me)
 
     // the 1st free block
     block_1st = (eos_block_t *)(me->data);
-   
+
     block_1st->last = EOS_HEAP_MAX;
     block_1st->size = EOS_SIZE_HEAP - (eos_u16_t)sizeof(eos_block_t);
     block_1st->free = 1;
     block_1st->next = EOS_HEAP_MAX;
 }
 
+/**
+ * @brief 分配内存
+ *
+ * 从堆中分配指定大小的内存块。
+ *
+ * 算法：First-Fit（首次适配）
+ * 1. 遍历空闲块链表，找到第一个足够大的块
+ * 2. 如果剩余空间足够大，拆分块
+ * 3. 将新块加入已分配队列
+ *
+ * 对齐处理：
+ * - ARM Cortex-M0不支持非对齐访问
+ * - 自动填充到4字节对齐
+ * - offset字段记录填充字节数
+ *
+ * @param size 要分配的大小（字节）
+ * @return 分配到的内存指针，失败返回NULL
+ */
 void * eos_heap_malloc(eos_heap_t * const me, eos_u32_t size)
 {
     eos_block_t * block;
@@ -1094,6 +1673,19 @@ void * eos_heap_malloc(eos_heap_t * const me, eos_u32_t size)
     return p;
 }
 
+/**
+ * @brief 垃圾回收（释放事件）
+ *
+ * 当事件被处理完毕后调用，释放事件占用的内存。
+ *
+ * 处理流程：
+ * 1. 检查事件是否还有未处理的订阅者（sub为0表示已全部处理）
+ * 2. 从事件队列中移除
+ * 3. 调用eos_heap_free释放内存
+ * 4. 重新计算sub_general（所有待处理事件的订阅或）
+ *
+ * @param data 事件数据指针
+ */
 void eos_heap_gc(eos_heap_t * const me, void *data)
 {
     eos_event_inner_t *e = (eos_event_inner_t *)data;
@@ -1148,6 +1740,19 @@ void eos_heap_gc(eos_heap_t * const me, void *data)
     }
 }
 
+/**
+ * @brief 获取指定优先级的事件
+ *
+ * 从事件队列中找到属于指定优先级Actor的最老事件。
+ *
+ * @param priority Actor优先级
+ * @return 事件指针，如果队列为空或没有该优先级的事件返回NULL
+ *
+ * 设计要点：
+ * - 只返回当前Actor尚未处理的事件（evt->sub中对应位为1）
+ * - 找到后将对应位清除（evt->sub &= ~(1<<priority)）
+ * - 使用循环遍历，loop_count防止无限循环
+ */
 void *eos_heap_get_block(eos_heap_t * const me, eos_u8_t priority)
 {
     eos_block_t * block = EOS_NULL;
@@ -1176,6 +1781,18 @@ void *eos_heap_get_block(eos_heap_t * const me, eos_u8_t priority)
     return (void *)e;
 }
 
+/**
+ * @brief 释放内存块
+ *
+ * 将内存块标记为空闲，并尝试与相邻的空闲块合并。
+ *
+ * 合并策略：
+ * 1. 检查前一块（last），如果空闲则合并
+ * 2. 检查后一块（next），如果空闲则合并
+ * 3. 合并后的块成为更大的空闲块
+ *
+ * @param data 要释放的内存指针
+ */
 void eos_heap_free(eos_heap_t * const me, void * data)
 {
     eos_block_t * block = (eos_block_t *)((eos_pointer_t)data - sizeof(eos_block_t));
@@ -1194,7 +1811,7 @@ void eos_heap_free(eos_heap_t * const me, void * data)
             block = block_last;
         }
     }
-    
+
     /* Check the block can be combined with the later one. */
     if (block->next != EOS_HEAP_MAX) {
         eos_block_t * block_next = (eos_block_t *)(me->data + block->next);
@@ -1213,12 +1830,26 @@ void eos_heap_free(eos_heap_t * const me, void * data)
     me->count --;
 }
 
-/* for unittest ------------------------------------------------------------- */
+/* 测试辅助接口 ================================================================
+ *
+ * 这些函数主要用于单元测试访问框架内部状态。
+ */
+
+/**
+ * @brief 获取框架实例指针
+ *
+ * 用于测试代码验证框架状态。
+ */
 void * eos_get_framework(void)
 {
     return (void *)&eos;
 }
 
+/**
+ * @brief 设置系统时间
+ *
+ * 用于测试时人工控制时间流逝。
+ */
 #if (EOS_USE_TIME_EVENT != 0)
 void eos_set_time(eos_u32_t time_ms)
 {
