@@ -406,25 +406,33 @@ static void eos_clear(void)
  */
 void eos_init(void)
 {
+    /* 先清掉运行期状态，例如计时器数量这类“上电后会变化”的字段。 */
     eos_clear();
 
 #if (EOS_USE_MAGIC != 0)
+    /* 如果启用了 magic number，就先给框架单例打上完整性标记。 */
     eos.magic = EOS_MAGIC_NUMBER;
 #endif
+    /* 框架初始化完成后默认处于 enabled，但此时还没有进入调度循环。 */
     eos.enabled = EOS_True;
     eos.running = EOS_False;
+    /* 此时还没有任何 actor 被注册，也没有 actor 被启动。 */
     eos.actor_exist = 0;
     eos.actor_enabled = 0;
 #if (EOS_USE_PUB_SUB != 0)
+    /* 订阅表由用户后续通过 eos_sub_init() 提供，这里先置空。 */
     eos.sub_table = EOS_NULL;
 #endif
 
 #if (EOS_USE_EVENT_DATA != 0)
+    /* 初始化事件堆，后面所有事件实例都会进入这个内部队列。 */
     eos_heap_init(&eos.heap);
 #endif
 
+    /* 标记初始化结束，后面 eos_once()/发布事件 时都会检查这个标志。 */
     eos.init_end = 1;
 #if (EOS_USE_TIME_EVENT != 0)
+    /* 软件时基从 0 开始累计。 */
     eos.time = 0;
 #endif
 }
@@ -446,7 +454,9 @@ void eos_init(void)
 #if (EOS_USE_PUB_SUB != 0)
 void eos_sub_init(eos_mcu_t *flag_sub, eos_topic_t topic_max)
 {
+    /* 保存用户提供的订阅位图表地址。 */
     eos.sub_table = flag_sub;
+    /* 初始化时每个 topic 默认都没有订阅者。 */
     for (int i = 0; i < topic_max; i ++) {
         eos.sub_table[i] = 0;
     }
@@ -561,35 +571,42 @@ eos_s32_t eos_evttimer(void)
  */
 eos_s8_t eos_once(void)
 {
+    /* 没做 eos_init() 就不能进入调度。 */
     if (eos.init_end == 0) {
         return (eos_s8_t)EosRunErr_NotInitEnd;
     }
 
 #if (EOS_USE_PUB_SUB != 0)
+    /* 发布订阅模式下，订阅表必须已经准备好。 */
     if (eos.sub_table == EOS_NULL) {
         return (eos_s8_t)EosRunErr_SubTableNull;
     }
 #endif
 
+    /* 如果外部调用了 eos_stop()，这里会感知到并退出主循环。 */
     if (eos.enabled == EOS_False) {
         eos_clear();
         return (eos_s8_t)EosRun_NotEnabled;
     }
 
     // 检查是否有状态机的注册
+    /* 至少要有一个已注册 actor，且至少一个 actor 已经 start。 */
     if (eos.actor_exist == 0 || eos.actor_enabled == 0) {
         return (eos_s8_t)EosRun_NoActor;
     }
 
 #if (EOS_USE_TIME_EVENT != 0)
+    /* 先把已经到期的时间事件转成普通事件。 */
     eos_evttimer();
 #endif
 
+    /* 事件堆为空，说明这一轮没有事情可做。 */
     if (eos.heap.empty == EOS_True) {
         return (eos_s8_t)EosRun_NoEvent;
     }
 
     // 寻找到优先级最高，且有事件需要处理的Actor
+    /* 从高优先级往低优先级找：谁当前既存在，又确实有待处理事件。 */
     eos_actor_t *actor = eos.actor[0];
     eos_u8_t priority = EOS_MAX_ACTORS;
     for (eos_s8_t i = (eos_s8_t)(EOS_MAX_ACTORS - 1); i >= 0; i --) {
@@ -602,16 +619,19 @@ eos_s8_t eos_once(void)
         break;
     }
     // 如果没有找到，返回
+    /* 订阅位图显示有活，但最终没定位到 actor，返回异常状态。 */
     if (priority == EOS_MAX_ACTORS) {
         return (eos_s8_t)EosRun_NoActorSub;
     }
 
     // 寻找当前Actor的最老的事件
+    /* 取出“属于当前 actor 的最老事件”，同时清掉它的订阅位。 */
     eos_port_critical_enter();
     eos_event_inner_t * e = eos_heap_get_block(&eos.heap, priority);
     EOS_ASSERT(e != EOS_NULL);
 
     eos_port_critical_exit();
+    /* 对外暴露的是 eos_event_t，内部事件头要在这里做一次转换。 */
     eos_event_t event;
     event.topic = e->topic;
     event.data = (void *)((eos_pointer_t)e + sizeof(eos_event_inner_t));
@@ -625,6 +645,7 @@ eos_s8_t eos_once(void)
     {
 #if (EOS_USE_SM_MODE != 0)
         if (actor->mode == EOS_Mode_StateMachine) {
+            /* 状态机 actor：可能在处理过程中发生状态切换。 */
             // 执行状态的转换
             eos_sm_t *sm = (eos_sm_t *)actor;
             eos_sm_dispath(sm, &event);
@@ -632,6 +653,7 @@ eos_s8_t eos_once(void)
         else
 #endif
         {
+            /* Reactor actor：直接执行它的事件处理函数。 */
             eos_reactor_t *reactor = (eos_reactor_t *)actor;
             reactor->event_handler(reactor, &event);
         }
@@ -643,6 +665,8 @@ eos_s8_t eos_once(void)
 #endif
 #if (EOS_USE_EVENT_DATA != 0)
     // 销毁过期事件与其携带的参数
+    /* 事件处理结束后尝试回收。
+     * 如果还有别的订阅者没消费完，这个事件块会继续保留。 */
     eos_port_critical_enter();
     eos_heap_gc(&eos.heap, e);
     eos_port_critical_exit();
@@ -671,8 +695,10 @@ eos_s8_t eos_once(void)
  */
 void eos_run(void)
 {
+    /* 应用层启动钩子：在正式进入调度循环前执行一次。 */
     eos_hook_start();
 
+    /* 进入主循环前，把最基本的前置条件先断言检查一遍。 */
     EOS_ASSERT(eos.enabled == EOS_True);
 #if (EOS_USE_PUB_SUB != 0)
     EOS_ASSERT(eos.sub_table != 0);
@@ -681,16 +707,21 @@ void eos_run(void)
     EOS_ASSERT(eos.heap.size != 0);
 #endif
 
+    /* 从这里开始，框架已经真正进入运行态。 */
     eos.running = EOS_True;
 
+    /* 主循环：每次循环最多处理一个事件。 */
     while (eos.enabled) {
         eos_s8_t ret = eos_once();
+        /* ret < 0 表示框架内部错误。 */
         EOS_ASSERT(ret >= 0);
 
+        /* eos_once() 发现框架被停止，请求离开主循环。 */
         if (ret == EosRun_NotEnabled) {
             break;
         }
 
+        /* 没有 actor 或没有事件时，不算错误，而是进入 idle 钩子。 */
         if (ret == EosRun_NoActor || ret == EosRun_NoEvent) {
 #if (EOS_USE_MAGIC != 0)
             EOS_ASSERT(eos.heap.magic == EOS_MAGIC_NUMBER);
@@ -705,6 +736,7 @@ void eos_run(void)
         }
     }
 
+    /* EventOS Nano 不返回到调用者；停止后永久停在 idle。 */
     while (1) {
         eos_hook_idle();
     }
@@ -721,7 +753,9 @@ void eos_run(void)
  */
 void eos_stop(void)
 {
+    /* 先发出“停止请求”，让 eos_run() 在下一轮感知到。 */
     eos.enabled = EOS_False;
+    /* 再立即回调 stop 钩子，给应用层机会关硬件、拉告警。 */
     eos_hook_stop();
 }
 
@@ -739,6 +773,7 @@ void eos_stop(void)
 #if (EOS_USE_TIME_EVENT != 0)
 eos_u32_t eos_time(void)
 {
+    /* 只读返回当前的软件系统时间。 */
     return eos.time;
 }
 
@@ -758,10 +793,13 @@ eos_u32_t eos_time(void)
  */
 void eos_tick(void)
 {
+    /* 同时保留旧时间和新时间，用于检测软件时钟是否回绕。 */
     eos_u32_t system_time = eos.time, system_time_bkp = eos.time;
     eos_u32_t offset = EOS_MS_NUM_30DAY - 1 + EOS_TICK_MS;
+    /* 每调用一次，就按配置的 tick 步长推进软件时间。 */
     system_time = ((system_time + EOS_TICK_MS) % EOS_MS_NUM_30DAY);
     if (system_time_bkp >= (EOS_MS_NUM_30DAY - EOS_TICK_MS) && system_time < EOS_TICK_MS) {
+        /* 时间回绕时，要把所有绝对超时时间一起平移，保证定时器逻辑不乱。 */
         eos_port_critical_enter();
         EOS_ASSERT(eos.timeout_min >= offset);
         eos.timeout_min -= offset;
@@ -771,6 +809,7 @@ void eos_tick(void)
         }
         eos_port_critical_exit();
     }
+    /* 最后再提交新的系统时间。 */
     eos.time = system_time;
 }
 #endif
@@ -802,29 +841,37 @@ static void eos_actor_init( eos_actor_t * const me,
                             eos_u8_t priority,
                             void const * const parameter)
 {
+    /* 当前版本没有使用 parameter，但保留这个入口方便后续扩展。 */
     (void)parameter;
 
     // 框架需要先启动起来
+    /* actor 只能在 eos_init() 之后、eos_run() 之前注册。 */
     EOS_ASSERT(eos.enabled == EOS_True);
     EOS_ASSERT(eos.running == EOS_False);
 #if (EOS_USE_PUB_SUB != 0)
+    /* 发布订阅模式下，没有订阅表就无法安全注册 actor。 */
     EOS_ASSERT(eos.sub_table != EOS_NULL);
 #endif
     // 参数检查
+    /* 基本参数合法性检查。 */
     EOS_ASSERT(me != (eos_actor_t *)0);
     EOS_ASSERT(priority < EOS_MAX_ACTORS);
 
     // 防止二次启动
+    /* 防止同一个 actor 被重复初始化/重复注册。 */
     if (me->enabled == EOS_True)
         return;
 
     // 检查优先级的重复注册
+    /* 每个优先级位只能挂一个 actor。 */
     EOS_ASSERT((eos.actor_exist & (1 << priority)) == 0);
 
     // 注册到框架里
+    /* 把 actor 写入框架注册表。 */
     eos.actor_exist |= (1 << priority);
     eos.actor[priority] = me;
     // 状态机
+    /* 把优先级保存到 actor 自身。 */
     me->priority = priority;
 #if (EOS_USE_MAGIC != 0)
     me->magic = EOS_MAGIC_NUMBER;
@@ -841,7 +888,9 @@ void eos_reactor_init(  eos_reactor_t * const me,
                         eos_u8_t priority,
                         void const * const parameter)
 {
+    /* 先走公共 actor 初始化。 */
     eos_actor_init(&me->super, priority, parameter);
+    /* 再标记它是 reactor 模式。 */
     me->super.mode = EOS_Mode_Reactor;
 }
 
@@ -856,8 +905,11 @@ void eos_reactor_init(  eos_reactor_t * const me,
  */
 void eos_reactor_start(eos_reactor_t * const me, eos_event_handler event_handler)
 {
+    /* 保存 reactor 的事件处理入口。 */
     me->event_handler = event_handler;
+    /* 启用这个 actor。 */
     me->super.enabled = EOS_True;
+    /* 同步更新“已启动 actor”位图。 */
     eos.actor_enabled |= (1 << me->super.priority);
 }
 
@@ -884,8 +936,11 @@ void eos_sm_init(   eos_sm_t * const me,
                     eos_u8_t priority,
                     void const * const parameter)
 {
+    /* 先复用公共 actor 初始化逻辑。 */
     eos_actor_init(&me->super, priority, parameter);
+    /* 标记该 actor 运行在状态机模式。 */
     me->super.mode = EOS_Mode_StateMachine;
+    /* 启动前默认指向最顶层伪状态。 */
     me->state = eos_state_top;
 }
 
@@ -914,50 +969,65 @@ void eos_sm_init(   eos_sm_t * const me,
 void eos_sm_start(eos_sm_t * const me, eos_state_handler state_init)
 {
 #if (EOS_USE_HSM_MODE != 0)
+    /* path[] 用来记录初始化进入路径。 */
     eos_state_handler path[EOS_MAX_HSM_NEST_DEPTH];
 #endif
     eos_state_handler t;
 
+    /* 先安装“初始状态处理函数”。 */
     me->state = state_init;
+    /* 状态机从这里开始允许被框架调度。 */
     me->super.enabled = EOS_True;
     eos.actor_enabled |= (1 << me->super.priority);
 
     // 进入初始状态，执行TRAN动作。这也意味着，进入初始状态，必须无条件执行Tran动作。
+    /* 初始状态并不是最终业务状态，它必须在 Event_Null 上返回一次
+     * EOS_Ret_Tran，把状态机带到真正的初始叶子状态。 */
     t = me->state;
     eos_ret_t ret = t(me, &eos_event_table[Event_Null]);
     EOS_ASSERT(ret == EOS_Ret_Tran);
 #if (EOS_USE_HSM_MODE == 0)
+    /* 普通 FSM：做完初始跳转后，直接补一次 Event_Enter。 */
     ret = me->state(me, &eos_event_table[Event_Enter]);
     EOS_ASSERT(ret != EOS_Ret_Tran);
 #else
     t = eos_state_top;
     // 由初始状态转移，引发的各层状态的进入
     // 每一个循环，都代表着一个Event_Init的执行
+    /* HSM：要把父状态链一层一层补齐进入动作。 */
     eos_s32_t ip = 0;
     ret = EOS_Ret_Null;
     do {
         // 由当前层，探测需要进入的各层父状态
+        /* path[0] 永远是当前目标叶子状态。 */
         path[0] = me->state;
         // 一层一层的探测，一直探测到原状态
+        /* Event_Null 在 HSM 里承担“查询父状态”的作用。 */
         HSM_TRIG_(me->state, Event_Null);
         while (me->state != t) {
             ++ ip;
             EOS_ASSERT(ip < EOS_MAX_HSM_NEST_DEPTH);
+            /* 逐层记录父状态路径。 */
             path[ip] = me->state;
             HSM_TRIG_(me->state, Event_Null);
         }
+        /* 恢复真正的目标叶子状态。 */
         me->state = path[0];
 
         // 各层状态的进入
+        /* 按“从父到子”的顺序补做 Event_Enter。 */
         do {
             HSM_TRIG_(path[ip --], Event_Enter);
         } while (ip >= 0);
 
+        /* 当前最深叶子状态保存到 t。 */
         t = path[0];
 
+        /* 如果当前状态还有默认子状态，会在 Event_Init 上继续下钻。 */
         ret = HSM_TRIG_(t, Event_Init);
     } while (ret == EOS_Ret_Tran);
 
+    /* 初始化全部完成后，状态机稳定在最终叶子状态。 */
     me->state = t;
 #endif
 }
@@ -992,54 +1062,69 @@ void eos_sm_start(eos_sm_t * const me, eos_state_handler state_init)
  */
 eos_s8_t eos_event_pub_ret(eos_topic_t topic, void *data, eos_u32_t size)
 {
+    /* 只有在框架完成初始化后，事件发布才是合法的。 */
     if (eos.init_end == 0) {
         return (eos_s8_t)EosRunErr_NotInitEnd;
     }
 
 #if (EOS_USE_PUB_SUB != 0)
+    /* 发布订阅模式下，没有订阅表就没法建立订阅快照。 */
     if (eos.sub_table == EOS_NULL) {
         return (eos_s8_t)EosRunErr_SubTableNull;
     }
 #endif
 
     // 保证框架已经运行
+    /* 框架已经停止时，拒绝继续入队新事件。 */
     if (eos.enabled == 0) {
         return (eos_s8_t)EosRun_NotEnabled;
     }
 
+    /* 连 actor 都没有，说明当前没人能消费这个事件。 */
     if (eos.actor_exist == 0) {
         return (eos_s8_t)EosRun_NoActor;
     }
 
     // 没有状态机使能，返回
+    /* 有 actor 但没有任何 actor start，也不能接收事件。 */
     if (eos.actor_enabled == 0) {
         return (eos_s8_t)EosRun_NotEnabled;
     }
     // 没有状态机订阅，返回
 #if (EOS_USE_PUB_SUB != 0)
+    /* 发布订阅模式下，没人订阅就没必要创建事件实例。 */
     if (eos.sub_table[topic] == 0) {
         return (eos_s8_t)EosRun_NoActorSub;
     }
 #endif
 
+    /* 分配事件块并修改队列元数据时要进入临界区。 */
     eos_port_critical_enter();
     // 申请事件空间
+    /* 申请 [内部事件头 + 数据负载] 这一整块空间。 */
     eos_event_inner_t *e = eos_heap_malloc(&eos.heap, (size + sizeof(eos_event_inner_t)));
     if (e == (eos_event_inner_t *)0) {
         eos_port_critical_exit();
         return (eos_s8_t)EosRunErr_MallocFail;
     }
+    /* 先写入 topic。 */
     e->topic = topic;
 #if (EOS_USE_PUB_SUB != 0)
+    /* 把当前 topic 的订阅位图快照到事件内部。 */
     e->sub = eos.sub_table[e->topic];
 #else
+    /* 非发布订阅模式下，默认广播给所有 actor。 */
     e->sub = eos.actor_exist;
 #endif
+    /* 更新全局汇总位图，便于 eos_once() 快速判断谁有活。 */
     eos.heap.sub_general |= e->sub;
+    /* 数据区紧跟在内部事件头后面。 */
     eos_u8_t *e_data = (eos_u8_t *)e + sizeof(eos_event_inner_t);
+    /* 把用户 payload 复制进框架私有堆内存。 */
     for (eos_u32_t i = 0; i < size; i ++) {
         e_data[i] = ((eos_u8_t *)data)[i];
     }
+    /* 事件现在已经完整入队。 */
     eos_port_critical_exit();
 
     return (eos_s8_t)EosRun_OK;
@@ -1052,6 +1137,7 @@ eos_s8_t eos_event_pub_ret(eos_topic_t topic, void *data, eos_u32_t size)
  */
 void eos_event_pub_topic(eos_topic_t topic)
 {
+    /* 纯 topic 事件：没有 payload，只靠 topic 驱动订阅者。 */
     eos_s8_t ret = eos_event_pub_ret(topic, EOS_NULL, 0);
     EOS_ASSERT(ret >= 0);
     (void)ret;
@@ -1065,6 +1151,7 @@ void eos_event_pub_topic(eos_topic_t topic)
 #if (EOS_USE_EVENT_DATA != 0)
 void eos_event_pub(eos_topic_t topic, void *data, eos_u32_t size)
 {
+    /* 带 payload 的事件：底层仍然统一走 eos_event_pub_ret()。 */
     eos_s8_t ret = eos_event_pub_ret(topic, data, size);
     EOS_ASSERT(ret >= 0);
     (void)ret;
@@ -1079,6 +1166,7 @@ void eos_event_pub(eos_topic_t topic, void *data, eos_u32_t size)
 #if (EOS_USE_PUB_SUB != 0)
 void eos_event_sub(eos_actor_t * const me, eos_topic_t topic)
 {
+    /* 把该 actor 的优先级位加入这个 topic 的订阅位图。 */
     eos.sub_table[topic] |= (1 << me->priority);
 }
 
@@ -1089,6 +1177,7 @@ void eos_event_sub(eos_actor_t * const me, eos_topic_t topic)
  */
 void eos_event_unsub(eos_actor_t * const me, eos_topic_t topic)
 {
+    /* 从这个 topic 的订阅位图里清掉该 actor 的优先级位。 */
     eos.sub_table[topic] &= ~(1 << me->priority);
 }
 #endif
@@ -1117,35 +1206,45 @@ void eos_event_unsub(eos_actor_t * const me, eos_topic_t topic)
 #if (EOS_USE_TIME_EVENT != 0)
 void eos_event_pub_time(eos_topic_t topic, eos_u32_t time_ms, eos_bool_t oneshoot)
 {
+    /* 时间事件必须有正延时，且不能超过框架允许的最大范围。 */
     EOS_ASSERT(time_ms != 0);
     EOS_ASSERT(time_ms <= timer_threshold[EosTimerUnit_Minute]);
     EOS_ASSERT(eos.timer_count < EOS_MAX_TIME_EVENT);
 
     // 检查重复，不允许重复发送。
+    /* 同一个 topic 当前实现只允许挂一个时间事件。 */
     for (eos_u32_t i = 0; i < eos.timer_count; i ++) {
         EOS_ASSERT(topic != eos.etimer[i].topic);
     }
 
+    /* 用当前软件时间作为绝对超时时刻的基准。 */
     eos_u32_t system_ms = eos.time;
+    /* 默认先按毫秒精度考虑。 */
     eos_u8_t unit = EosTimerUnit_Ms;
     eos_u16_t period;
+    /* 根据延时时长自动选择合适的时间粒度。 */
     for (eos_u8_t i = 0; i < EosTimerUnit_Max; i ++) {
         if (time_ms > timer_threshold[i])
             continue;
         unit = i;
 
         if (i == EosTimerUnit_Ms) {
+            /* 毫秒级不需要换算，直接保存原值。 */
             period = time_ms;
             break;
         }
+        /* 更粗粒度下，period 保存“多少个时间单位”。 */
         period = (time_ms + (timer_unit[i] >> 1)) / timer_unit[i];
         break;
     }
+    /* timeout 一律保存绝对到期时刻。 */
     eos_u32_t timeout = (system_ms + time_ms);
+    /* 把这个时间事件挂进活动定时器表。 */
     eos.etimer[eos.timer_count ++] = (eos_event_timer_t) {
         topic, oneshoot, unit, period, timeout
     };
 
+    /* 更新“最近到期时间”缓存，加速后续判断。 */
     if (eos.timeout_min > timeout) {
         eos.timeout_min = timeout;
     }
@@ -1156,6 +1255,7 @@ void eos_event_pub_time(eos_topic_t topic, eos_u32_t time_ms, eos_bool_t oneshoo
  */
 void eos_event_pub_delay(eos_topic_t topic, eos_u32_t time_ms)
 {
+    /* 一次性延时事件。 */
     eos_event_pub_time(topic, time_ms, EOS_True);
 }
 
@@ -1164,6 +1264,7 @@ void eos_event_pub_delay(eos_topic_t topic, eos_u32_t time_ms)
  */
 void eos_event_pub_period(eos_topic_t topic, eos_u32_t peroid_ms)
 {
+    /* 周期事件。 */
     eos_event_pub_time(topic, peroid_ms, EOS_False);
 }
 
@@ -1174,25 +1275,31 @@ void eos_event_pub_period(eos_topic_t topic, eos_u32_t peroid_ms)
  */
 void eos_event_time_cancel(eos_topic_t topic)
 {
+    /* 删除指定 topic 的时间事件，并重算最近到期时间。 */
     eos_u32_t timeout_min = EOS_U32_MAX;
     for (eos_u32_t i = 0; i < eos.timer_count; i ++) {
+        /* 不是目标 topic，就顺手拿它参与 timeout_min 重算。 */
         if (topic != eos.etimer[i].topic) {
             timeout_min =   timeout_min > eos.etimer[i].timeout_ms ?
                             eos.etimer[i].timeout_ms :
                             timeout_min;
             continue;
         }
+        /* 删除最后一个元素时，只需要减少计数。 */
         if (i == (eos.timer_count - 1)) {
             eos.timer_count --;
             break;
         }
         else {
+            /* 中间元素删除时，用最后一个元素覆盖当前位置。 */
             eos.etimer[i] = eos.etimer[eos.timer_count - 1];
             eos.timer_count -= 1;
+            /* 覆盖进来的这个新元素还要重新检查一遍。 */
             i --;
         }
     }
 
+    /* 发布新的最近到期时间缓存。 */
     eos.timeout_min = timeout_min;
 }
 #endif
@@ -1207,8 +1314,10 @@ void eos_event_time_cancel(eos_topic_t topic)
 #if (EOS_USE_SM_MODE != 0)
 eos_ret_t eos_tran(eos_sm_t * const me, eos_state_handler state)
 {
+    /* 这里只做一件事：把目标状态函数写进 me->state。 */
     me->state = state;
 
+    /* 返回 EOS_Ret_Tran，让外层状态机分发器补做 Exit/Enter。 */
     return EOS_Ret_Tran;
 }
 
@@ -1219,8 +1328,10 @@ eos_ret_t eos_tran(eos_sm_t * const me, eos_state_handler state)
  */
 eos_ret_t eos_super(eos_sm_t * const me, eos_state_handler state)
 {
+    /* HSM 中，把父状态暂时写进 me->state，供分发器继续向上查找。 */
     me->state = state;
 
+    /* 返回 EOS_Ret_Super，表示“当前层不处理，请父状态接手”。 */
     return EOS_Ret_Super;
 }
 
@@ -1232,6 +1343,7 @@ eos_ret_t eos_super(eos_sm_t * const me, eos_state_handler state)
  */
 eos_ret_t eos_state_top(eos_sm_t * const me, eos_event_t const * const e)
 {
+    /* 顶层伪状态本身不处理业务事件，它只是层级状态机的锚点。 */
     (void)me;
     (void)e;
 
@@ -1267,29 +1379,39 @@ eos_ret_t eos_state_top(eos_sm_t * const me, eos_event_t const * const e)
 static void eos_sm_dispath(eos_sm_t * const me, eos_event_t const * const e)
 {
 #if (EOS_USE_HSM_MODE != 0)
+    /* path[] 用来保存层级跳转的进入路径。 */
     eos_state_handler path[EOS_MAX_HSM_NEST_DEPTH];
 #endif
     eos_ret_t r;
 
+    /* 分发器只接受有效事件对象。 */
     EOS_ASSERT(e != (eos_event_t *)0);
 
 #if (EOS_USE_HSM_MODE == 0)
+    /* s 保存当前状态，t 保存跳转目标。 */
     eos_state_handler s = me->state;
     eos_state_handler t;
 
+    /* 先把外部事件交给当前状态处理。 */
     r = s(me, e);
     if (r == EOS_Ret_Tran) {
+        /* 当前状态函数已经把目标状态写进 me->state。 */
         t = me->state;
+        /* 先执行源状态 Exit。 */
         r = s(me, &eos_event_table[Event_Exit]);
         EOS_ASSERT(r == EOS_Ret_Handled || r == EOS_Ret_Super);
+        /* 再执行目标状态 Enter。 */
         r = t(me, &eos_event_table[Event_Enter]);
         EOS_ASSERT(r == EOS_Ret_Handled || r == EOS_Ret_Super);
+        /* 最后提交当前状态。 */
         me->state = t;
     }
     else {
+        /* 没有跳转时，把当前状态恢复成原来的 s。 */
         me->state = s;
     }
 #else
+    /* t 是外部事件进入前的当前状态；s 是逐层上探时的处理状态。 */
     eos_state_handler t = me->state;
     eos_state_handler s;
 
@@ -1555,10 +1677,11 @@ void eos_heap_init(eos_heap_t * const me)
     eos_block_t * block_1st;
 
 #if (EOS_USE_MAGIC != 0)
+    /* 给 heap 自身打上完整性标记。 */
     me->magic = EOS_MAGIC_NUMBER;
 #endif
 
-    // block start
+    /* 初始化事件队列与堆管理元数据。 */
     me->queue = EOS_HEAP_MAX;
     me->error_id = 0;
     me->size = EOS_SIZE_HEAP;
@@ -1566,9 +1689,11 @@ void eos_heap_init(eos_heap_t * const me)
     me->sub_general = 0;
     me->current = EOS_HEAP_MAX;
 
+    /* 底层缓冲区全部清零。 */
     memset(me->data, 0, EOS_SIZE_HEAP);
 
     // the 1st free block
+    /* 整个 heap 初始被视为一个完整的空闲块。 */
     block_1st = (eos_block_t *)(me->data);
 
     block_1st->last = EOS_HEAP_MAX;
@@ -1600,6 +1725,7 @@ void * eos_heap_malloc(eos_heap_t * const me, eos_u32_t size)
     eos_block_t * block;
     eos_s16_t remaining;
 
+    /* 不允许申请 0 字节。 */
     if (size == 0) {
         me->error_id = 1;
         return EOS_NULL;
@@ -1607,6 +1733,7 @@ void * eos_heap_malloc(eos_heap_t * const me, eos_u32_t size)
 
     /* Find the first free block in the block-list. */
     eos_u16_t next = 0;
+    /* First-Fit：找到第一个足够大的空闲块。 */
     do {
         block = (eos_block_t *)(me->data + next);
         remaining = (block->size - size - sizeof(eos_block_t));
@@ -1616,6 +1743,7 @@ void * eos_heap_malloc(eos_heap_t * const me, eos_u32_t size)
         next = block->next;
     } while (next != EOS_HEAP_MAX);
 
+    /* 走到末尾还没找到空间，说明堆不够。 */
     if (next == EOS_HEAP_MAX) {
         me->error_id = 2;
         return EOS_NULL;
@@ -1623,50 +1751,61 @@ void * eos_heap_malloc(eos_heap_t * const me, eos_u32_t size)
 
     /* Divide the block into two blocks. */
     /* ARM Cortex-M0不支持非对齐访问 */
+    /* 做 4 字节对齐，兼容不支持非对齐访问的 MCU。 */
     eos_u8_t offset = (size % 4);
     size = (offset == 0) ? size : (size + 4 - offset);
     eos_pointer_t address = (eos_pointer_t)block + size + sizeof(eos_block_t);
+    /* new_block 表示切分后剩下的那部分空闲块。 */
     eos_block_t * new_block = (eos_block_t *)address;
     eos_u32_t _size = block->size - size - sizeof(eos_block_t);
 
     /* Update the list. */
+    /* 先补齐剩余空闲块的元数据。 */
     new_block->size = _size;
     new_block->free = EOS_True;
     new_block->next = block->next;
     new_block->last = (eos_u16_t)((eos_pointer_t)block - (eos_pointer_t)me->data);
 
+    /* 再把当前块改造成“已分配块”。 */
     block->next = (eos_u16_t)((eos_pointer_t)new_block - (eos_pointer_t)me->data);
     block->size = size;
     block->free = EOS_False;
     block->offset = (offset == 0) ? 0 : (4 - offset);
 
+    /* 如果后面还有空闲块，顺手修正它的 last 指针。 */
     if (new_block->next != EOS_HEAP_MAX) {
         eos_block_t * block_next2 = (eos_block_t *)((eos_pointer_t)me->data + new_block->next);
         block_next2->last = (eos_u16_t)((eos_pointer_t)new_block - (eos_pointer_t)me->data);
     }
 
     /* 挂在Queue的最后端 */
+    /* 已分配出来的事件块还要挂到事件队列尾部。 */
     next = me->queue;
     eos_block_t * block_queue;
     if (me->queue == EOS_HEAP_MAX) {
+        /* 队列原来为空，这个块就是第一个事件块。 */
         me->queue = (eos_u16_t)((eos_pointer_t)block - (eos_pointer_t)me->data);
         block->q_next = EOS_HEAP_MAX;
         block->q_last = EOS_HEAP_MAX;
         me->current = me->queue;
     }
     else {
+        /* 队列非空时，先走到当前队尾。 */
         do {
             block_queue = (eos_block_t *)(me->data + next);
             next = block_queue->q_next;
         } while (next != EOS_HEAP_MAX);
 
+        /* 把新块追加到队尾。 */
         block_queue->q_next = (eos_u16_t)((eos_pointer_t)block - (eos_pointer_t)me->data);
         block->q_next = EOS_HEAP_MAX;
         block->q_last = (eos_u16_t)((eos_pointer_t)block_queue - (eos_pointer_t)me->data);
     }
 
+    /* 更新堆状态。 */
     me->error_id = 0;
     me->empty = 0;
+    /* 返回给上层的是“块头后面的数据区”指针。 */
     void *p = (void *)((eos_pointer_t)block + (eos_u32_t)sizeof(eos_block_t));
     me->count ++;
 
@@ -1688,8 +1827,10 @@ void * eos_heap_malloc(eos_heap_t * const me, eos_u32_t size)
  */
 void eos_heap_gc(eos_heap_t * const me, void *data)
 {
+    /* data 指向内部事件头，不是用户 payload。 */
     eos_event_inner_t *e = (eos_event_inner_t *)data;
 
+    /* 只有当所有订阅位都清空，这个事件块才真正可以释放。 */
     if (e->sub == 0) {
         eos_block_t *block = (eos_block_t *)((eos_pointer_t)data - sizeof(eos_block_t));
         eos_u16_t index = (eos_u16_t)((eos_pointer_t)block - (eos_pointer_t)me->data);
@@ -1699,32 +1840,38 @@ void eos_heap_gc(eos_heap_t * const me, void *data)
         /* 从Queue中删除 */
         // 如果当前只有这一个block
         if (block->q_next == EOS_HEAP_MAX && block->q_last == EOS_HEAP_MAX) {
+            /* 队列里只剩这一个块。 */
             me->empty = 1;
             me->current = EOS_HEAP_MAX;
             me->queue = EOS_HEAP_MAX;
         }
         // 如果这个block在Queue的第一个
         else if (me->queue == index) {
+            /* 当前块在队头。 */
             block_next->q_last = EOS_HEAP_MAX;
             me->queue = block->q_next;
             me->current = block->q_next;
         }
         // 如果这个block在Queue的最后一个
         else if (block->q_next == EOS_HEAP_MAX) {
+            /* 当前块在队尾。 */
             block_last->q_next = EOS_HEAP_MAX;
             me->current = me->queue;
         }
         else {
+            /* 当前块在队列中间。 */
             block_last->q_next = block->q_next;
             block_next->q_last = block->q_last;
             me->current = block->q_next;
         }
 
         /* 释放这块内存 */
+        /* 真正把这块内存归还给堆。 */
         eos_heap_free(me, data);
     }
 
     /* 根据所有的sub重新生成sub_general */
+    /* 重新汇总所有未处理事件的订阅位图。 */
     me->sub_general = 0;
     eos_u16_t next = me->queue;
     eos_u16_t loop_count = 0;
@@ -1733,6 +1880,7 @@ void eos_heap_gc(eos_heap_t * const me, void *data)
         eos_event_inner_t *evt;
         block = (eos_block_t *)((eos_pointer_t)me->data + next);
         evt = (eos_event_inner_t *)((eos_pointer_t)block + sizeof(eos_block_t));
+        /* 逐个 OR 起来，形成“哪些 actor 还有活”的摘要。 */
         me->sub_general |= evt->sub;
         next = block->q_next;
 
@@ -1758,20 +1906,24 @@ void *eos_heap_get_block(eos_heap_t * const me, eos_u8_t priority)
     eos_block_t * block = EOS_NULL;
     eos_event_inner_t *e = EOS_NULL;
 
+    /* 优先级必须落在合法位宽内。 */
     EOS_ASSERT(priority < EOS_MAX_ACTORS);
 
     eos_u16_t next = me->queue;
     eos_u16_t loop_count = 0;
+    /* 从队头开始，找“当前 actor 还没消费过的最老事件”。 */
     while (next != EOS_HEAP_MAX && loop_count < me->count) {
         eos_event_inner_t *evt;
         block = (eos_block_t *)((eos_pointer_t)me->data + next);
         EOS_ASSERT(block->free == 0);
         evt = (eos_event_inner_t *)((eos_pointer_t)block + sizeof(eos_block_t));
         if ((evt->sub & (1 << priority)) == 0) {
+            /* 当前 actor 对这条事件已经消费过了，继续往后找。 */
             next = block->q_next;
             loop_count ++;
         }
         else {
+            /* 找到了目标事件，同时清掉当前 actor 的订阅位。 */
             e = evt;
             evt->sub &=~ (1 << priority);
             break;
@@ -1795,13 +1947,16 @@ void *eos_heap_get_block(eos_heap_t * const me, eos_u8_t priority)
  */
 void eos_heap_free(eos_heap_t * const me, void * data)
 {
+    /* 先从数据区指针回退到块头。 */
     eos_block_t * block = (eos_block_t *)((eos_pointer_t)data - sizeof(eos_block_t));
     eos_block_t * block_next;
     me->error_id = 0;
+    /* 先尝试和前一个物理相邻块合并。 */
     if (block->last != EOS_HEAP_MAX) {
         eos_block_t * block_last = (eos_block_t *)(me->data + block->last);
         /* Check the block can be combined with the front one. */
         if (block_last->free == 1) {
+            /* 前一个块如果空闲，就把当前块并进去。 */
             block_last->next = block->next;
             if (block->next != EOS_HEAP_MAX) {
                 block_next = (eos_block_t *)(me->data + block_last->next);
@@ -1813,10 +1968,12 @@ void eos_heap_free(eos_heap_t * const me, void * data)
     }
 
     /* Check the block can be combined with the later one. */
+    /* 再尝试和后一个物理相邻块合并。 */
     if (block->next != EOS_HEAP_MAX) {
         eos_block_t * block_next = (eos_block_t *)(me->data + block->next);
         eos_block_t * block_next2;
         if (block_next->free == 1) {
+            /* 后一个块也是空闲时，继续扩展当前空闲块。 */
             block->size += (block_next->size + (eos_u32_t)sizeof(eos_block_t));
             block->next = block_next->next;
             if (block->next != EOS_HEAP_MAX) {
@@ -1826,6 +1983,7 @@ void eos_heap_free(eos_heap_t * const me, void * data)
         }
     }
 
+    /* 最终把合并后的块标记为空闲。 */
     block->free = 1;
     me->count --;
 }
