@@ -512,6 +512,7 @@ void eos_sm_init(   eos_sm_t * const me,
  */
 void eos_sm_start(eos_sm_t * const me, eos_state_handler state_init);
 
+
 /**
  * @brief 状态转换宏
  *
