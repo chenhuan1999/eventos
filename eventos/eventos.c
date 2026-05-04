@@ -1,36 +1,18 @@
-/*
- * EventOS Nano
- * Copyright (c) 2021, EventOS Team, <event-os@outlook.com>
- *
- * SPDX-License-Identifier: MIT
- *
- * Permission is hereby granted, free of charge, to any person obtaining a copy
- * of this software and associated documentation files (the 'Software'), to deal
- * in the Software without restriction, including without limitation the rights
- * to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
- * copies of the Software, and to permit persons to whom the Software is furnished
- * to do so, subject to the following conditions:
- *
- * The above copyright notice and this permission notice shall be
- * included in all copies or substantial portions of the Software.
- *
- * THE SOFTWARE IS PROVIDED 'AS IS', WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
- * IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY, FITNESS
- * FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE AUTHORS
- * OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY,
- * WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR
- * IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
- *
- * https://www.event-os.cn
- * https://github.com/event-os/eventos-nano
- * https://gitee.com/event-os/eventos-nano
- *
- * Change Logs:
- * Date           Author        Notes
- * 2021-11-23     DogMing       V0.0.2
- * 2021-11-23     DogMing       V0.1.4 Fix heap bug.
+/**
+ * @file eventos.c
+ * @brief 
+ * @author ChenHuAn (1249995896@qq.com)
+ * @version 1.0
+ * @date 2026-05-04
+ * 
+ * @copyright Copyright (c) 2026  ChenHuAn
+ * 
+ * @par 修改日志:
+ * <table>
+ * <tr><th>Date       <th>Version <th>Author  <th>Description
+ * <tr><td>2026-05-04 <td>1.0     <td>ChenHuAn     <td>内容
+ * </table>
  */
-
 // include ---------------------------------------------------------------------
 #include "eventos.h"
 #include <string.h>

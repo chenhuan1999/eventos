@@ -55,8 +55,9 @@
  *
  * 设计理由：使用位掩码(bitmask)来标记哪些优先级的Actor存在和启用，
  * 所以Actor数量不能超过位图能表示的范围。
+ * 也就是说，8位MCU最多支持8个Actor，16位MCU最多支持16个Actor，32位MCU最多支持32个Actor。
  */
-#define EOS_MAX_ACTORS                          4
+#define EOS_MAX_ACTORS                          16
 
 /**
  * @brief 测试平台位数
@@ -87,7 +88,7 @@
  *
  * 生产环境可关闭以减少内存占用和检查开销。
  */
-#define EOS_USE_MAGIC                           0
+#define EOS_USE_MAGIC                           1
 
 /* 断言配置 ------------------------------------------------------------ */
 
@@ -122,7 +123,7 @@
  *
  * 此选项依赖 EOS_USE_SM_MODE 同时开启。
  */
-#define EOS_USE_HSM_MODE                        1
+#define EOS_USE_HSM_MODE                        0
 
 #if (EOS_USE_SM_MODE != 0 && EOS_USE_HSM_MODE != 0)
 /**
@@ -224,7 +225,7 @@
  * 检查最大Actor数量是否在有效范围内：1 ~ MCU_TYPE。
  * 使用位掩码表示法，Actor优先级从0开始编号。
  */
-#if (EOS_MAX_ACTOR > EOS_MCU_TYPE || EOS_MAX_ACTORS <= 0)
+#if (EOS_MAX_ACTORS > EOS_MCU_TYPE || EOS_MAX_ACTORS <= 0)
 #error The maximum number of actors must be 1 ~ EOS_MCU_TYPE !
 #endif
 
