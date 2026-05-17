@@ -1,0 +1,4 @@
+interface:
+  display_name: "嵌入式 Codex 工作流"
+  short_description: "指导 Codex 按 PRD 和稳定上下文处理 MCU 固件任务。"
+  default_prompt: "使用这个 skill 来从 PRD 提取需求，规划、修改、记录和验证 MCU 单片机嵌入式固件变更，并保持需求、代码、测试和项目上下文闭环。"
