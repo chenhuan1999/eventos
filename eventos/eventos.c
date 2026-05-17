@@ -624,30 +624,20 @@ eos_s8_t eos_once(void)
     event.size = block->size - block->offset - sizeof(eos_event_inner_t);
 
     // 对事件进行执行
-#if (EOS_USE_PUB_SUB != 0)
-    if ((eos.sub_table[e->topic] & (1 << actor->priority)) != 0)
+#if (EOS_USE_SM_MODE != 0)
+    if (actor->mode == EOS_Mode_StateMachine) {
+        /* 状态机 actor：可能在处理过程中发生状态切换。 */
+        // 执行状态的转换
+        eos_sm_t *sm = (eos_sm_t *)actor;
+        eos_sm_dispath(sm, &event);
+    }
+    else
 #endif
     {
-#if (EOS_USE_SM_MODE != 0)
-        if (actor->mode == EOS_Mode_StateMachine) {
-            /* 状态机 actor：可能在处理过程中发生状态切换。 */
-            // 执行状态的转换
-            eos_sm_t *sm = (eos_sm_t *)actor;
-            eos_sm_dispath(sm, &event);
-        }
-        else
-#endif
-        {
-            /* Reactor actor：直接执行它的事件处理函数。 */
-            eos_reactor_t *reactor = (eos_reactor_t *)actor;
-            reactor->event_handler(reactor, &event);
-        }
+        /* Reactor actor：直接执行它的事件处理函数。 */
+        eos_reactor_t *reactor = (eos_reactor_t *)actor;
+        reactor->event_handler(reactor, &event);
     }
-#if (EOS_USE_PUB_SUB != 0)
-    else {
-        return (eos_s8_t)EosRunErr_ActorNotSub;
-    }
-#endif
 #if (EOS_USE_EVENT_DATA != 0)
     // 销毁过期事件与其携带的参数
     /* 事件处理结束后尝试回收。
@@ -844,20 +834,20 @@ static void eos_actor_init( eos_actor_t * const me,
 
     // 防止二次启动
     /* 防止同一个 actor 被重复初始化/重复注册。 */
-    if (me->enabled == EOS_True)
-        return;
+    eos_mcu_t actor_bit = (eos_mcu_t)(1u << priority);
 
     // 检查优先级的重复注册
     /* 每个优先级位只能挂一个 actor。 */
-    EOS_ASSERT((eos.actor_exist & (1 << priority)) == 0);
+    EOS_ASSERT((eos.actor_exist & actor_bit) == 0);
 
     // 注册到框架里
     /* 把 actor 写入框架注册表。 */
-    eos.actor_exist |= (1 << priority);
+    eos.actor_exist |= actor_bit;
     eos.actor[priority] = me;
     // 状态机
     /* 把优先级保存到 actor 自身。 */
     me->priority = priority;
+    me->enabled = EOS_False;
 #if (EOS_USE_MAGIC != 0)
     me->magic = EOS_MAGIC_NUMBER;
 #endif
