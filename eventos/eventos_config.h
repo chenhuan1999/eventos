@@ -183,6 +183,7 @@
  * 发布事件时指定数据指针和大小，接收时可获取完整数据。
  *
  * 关闭后，事件仅为信号通知，不携带额外数据，可节省内存。
+ * 一定不能关闭
  */
 #define EOS_USE_EVENT_DATA                      1
 
@@ -259,7 +260,7 @@
  * - 最大32767字节(0x7fff)：使用15位无符号数存储，大小不能超过这个限制
  */
 #if (EOS_USE_EVENT_DATA != 0)
-    #if (EOS_USE_HEAP != 0 && (EOS_SIZE_HEAP < 128 || EOS_SIZE_HEAP > EOS_HEAP_MAX))
+    #if (EOS_SIZE_HEAP < 128 || EOS_SIZE_HEAP > 32767)
         #error The heap size must be 128 ~ 32767 (32KB) if the function is enabled !
     #endif
 #endif

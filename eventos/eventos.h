@@ -253,7 +253,7 @@ typedef eos_event_t *                       eos_event_quote_t;
  *
  * 定义所有Actor共有的属性：
  * - magic: 魔术数字（可选，用于内存覆盖检测）
- * - priority: 优先级（0为最高），用于事件分发时的优先级排序
+ * - priority: 数字越大优先级越高
  * - mode: 运行模式（Reactor或StateMachine）
  * - enabled: 使能状态
  *

@@ -592,9 +592,12 @@ eos_s8_t eos_once(void)
     eos_actor_t *actor = eos.actor[0];
     eos_u8_t priority = EOS_MAX_ACTORS;
     for (eos_s8_t i = (eos_s8_t)(EOS_MAX_ACTORS - 1); i >= 0; i --) {
-        if ((eos.actor_exist & (1 << i)) == 0)
+        eos_sub_t actor_bit = (eos_sub_t)(1u << i);
+        if ((eos.actor_exist & actor_bit) == 0)
             continue;
-        if ((eos.heap.sub_general & (1 << i)) == 0)
+        if ((eos.actor_enabled & actor_bit) == 0)
+            continue;
+        if ((eos.heap.sub_general & actor_bit) == 0)
             continue;
         actor = eos.actor[i];
         priority = i;
@@ -685,7 +688,7 @@ void eos_run(void)
 #if (EOS_USE_PUB_SUB != 0)
     EOS_ASSERT(eos.sub_table != 0);
 #endif
-#if (EOS_USE_EVENT_DATA != 0 && EOS_USE_HEAP != 0)
+#if (EOS_USE_EVENT_DATA != 0)
     EOS_ASSERT(eos.heap.size != 0);
 #endif
 
@@ -1079,6 +1082,15 @@ eos_s8_t eos_event_pub_ret(eos_topic_t topic, void *data, eos_u32_t size)
     }
 #endif
 
+#if (EOS_USE_PUB_SUB != 0)
+    eos_sub_t target_sub = eos.sub_table[topic] & eos.actor_enabled;
+#else
+    eos_sub_t target_sub = eos.actor_exist & eos.actor_enabled;
+#endif
+    if (target_sub == 0) {
+        return (eos_s8_t)EosRun_NoActorSub;
+    }
+
     /* 分配事件块并修改队列元数据时要进入临界区。 */
     eos_port_critical_enter();
     // 申请事件空间
@@ -1092,10 +1104,10 @@ eos_s8_t eos_event_pub_ret(eos_topic_t topic, void *data, eos_u32_t size)
     e->topic = topic;
 #if (EOS_USE_PUB_SUB != 0)
     /* 把当前 topic 的订阅位图快照到事件内部。 */
-    e->sub = eos.sub_table[e->topic];
+    e->sub = target_sub;
 #else
     /* 非发布订阅模式下，默认广播给所有 actor。 */
-    e->sub = eos.actor_exist;
+    e->sub = target_sub;
 #endif
     /* 更新全局汇总位图，便于 eos_once() 快速判断谁有活。 */
     eos.heap.sub_general |= e->sub;
